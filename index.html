@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vote Arena - 3D Edition</title>
+    <title>Vote Arena - Live Edition</title>
     
     <!-- โหลด Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -27,10 +27,14 @@
         @keyframes float { 0%, 100% { transform: translateY(0px) translateZ(40px); } 50% { transform: translateY(-20px) translateZ(40px); } }
         .animate-float { animation: float 6s ease-in-out infinite; }
         .bg-grid-pattern { background-image: linear-gradient(to right, #1e293b 1px, transparent 1px), linear-gradient(to bottom, #1e293b 1px, transparent 1px); background-size: 40px 40px; }
+        
+        /* สไตล์สำหรับแจ้งเตือนคัดลอกลิงก์ */
+        .toast { transition: all 0.3s ease; }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.hide { opacity: 0; transform: translateY(-20px); pointer-events: none; }
     </style>
 </head>
 <body>
-    <!-- พื้นที่สำหรับแสดงผล React -->
     <div id="root"></div>
 
     <script type="text/babel" data-type="module">
@@ -41,14 +45,31 @@
           CheckCircle2, AlertCircle, BarChart3, PieChart, List, 
           Timer, Palette, Edit3, Trophy, Gamepad2, X, Play,
           Lock, Unlock, Clock, PlayCircle, StopCircle, PlusCircle, KeyRound,
-          Maximize, Music, Volume2, Power, ArrowDownToLine, ArrowUpToLine
+          Maximize, Music, Volume2, Power, ArrowDownToLine, ArrowUpToLine,
+          Share2, Link, CopyCheck
         } from 'https://esm.sh/lucide-react@0.292.0';
         import { 
           BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, 
           PieChart as RePieChart, Pie, Cell, Legend
         } from 'https://esm.sh/recharts@2.10.3';
 
-        // --- เสียงประกอบ (ใช้ไฟล์เสียง Public Domain / Creative Commons ที่อนุญาตให้ใช้ได้) ---
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Configuration (เชื่อมต่อคลาวด์)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            // Default config for demo purposes if environment is missing
+            projectId: "demo-vote-app",
+        };
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'live-vote-app';
+
+        // --- เสียงประกอบ ---
         const BGM_TRACKS = {
           track1: { name: '🎮 ตื่นเต้น (Action/Upbeat)', url: 'https://upload.wikimedia.org/wikipedia/commons/4/4c/Funk_Game_Loop.ogg' },
           track2: { name: '😰 ลุ้นระทึก (Suspense/Tense)', url: 'https://upload.wikimedia.org/wikipedia/commons/a/a9/Tense_Ambience.ogg' },
@@ -56,19 +77,14 @@
         };
 
         function App() {
-          // Application Entry State
+          // System State
+          const [isFirebaseReady, setIsFirebaseReady] = useState(false);
           const [hasEntered, setHasEntered] = useState(false);
-
-          // Voting Content State
-          const [topicTitle, setTopicTitle] = useState('ศึกตัดสิน: กิจกรรมวันหยุดประจำปี! 🏖️');
-          const [options, setOptions] = useState([
-            { id: 1, text: 'ไปเที่ยวทะเล', votes: 12, emoji: '🌊', color: '#0ea5e9' },
-            { id: 2, text: 'ขึ้นภูเขา/กางเต็นท์', votes: 8, emoji: '⛺', color: '#22c55e' },
-            { id: 3, text: 'นอนดูซีรีส์อยู่บ้าน', votes: 5, emoji: '🛋️', color: '#8b5cf6' },
-          ]);
-          
           const [view, setView] = useState('user');
           const [chartView, setChartView] = useState('list');
+          
+          // Toast Notification
+          const [toastMessage, setToastMessage] = useState({ show: false, text: '' });
           
           // Admin Auth State
           const [isAdminAuth, setIsAdminAuth] = useState(false);
@@ -76,124 +92,281 @@
           const ADMIN_PIN = '8888';
           const [pinError, setPinError] = useState(false);
 
-          // Voting Control State
-          const [votingState, setVotingState] = useState('waiting'); // 'waiting', 'active', 'locked'
-          const [votingDurationSetting, setVotingDurationSetting] = useState(30);
-          const [votingTimeLeft, setVotingTimeLeft] = useState(0);
+          // --- CLOUD STATE ---
+          const [roomState, setRoomState] = useState({
+            topicTitle: 'ศึกตัดสิน: กิจกรรมวันหยุดประจำปี! 🏖️',
+            votingState: 'waiting',
+            votingEndTime: 0,
+            durationSetting: 30,
+            winCondition: 'highest',
+            countdownSetting: 10,
+            winner: null,
+            bgmTrack: 'track1',
+            isBgmPlaying: false
+          });
+          const [options, setOptions] = useState([]);
 
-          // Game Rule State
-          const [winCondition, setWinCondition] = useState('highest'); // 'highest' or 'lowest'
-
-          // Result Process State
-          const [showResultOverlay, setShowResultOverlay] = useState(false); 
+          // Local UI State based on Cloud
+          const [localTimeLeft, setLocalTimeLeft] = useState(0);
+          const [showResultOverlay, setShowResultOverlay] = useState(false);
           const [isSpinning, setIsSpinning] = useState(false);
-          const [countdownSetting, setCountdownSetting] = useState(10); 
-          const [timeLeft, setTimeLeft] = useState(null); 
-          const [winner, setWinner] = useState(null);
-
-          // Modal State
-          const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, title: '', desc: '', action: null });
+          const [revealTimeLeft, setRevealTimeLeft] = useState(null);
 
           // Option Form State
           const [newOptionText, setNewOptionText] = useState('');
           const [newOptionEmoji, setNewOptionEmoji] = useState('✨');
           const [newOptionColor, setNewOptionColor] = useState('#f59e0b');
 
-          // Audio State
-          const [bgmTrack, setBgmTrack] = useState('track1');
-          const [isBgmPlaying, setIsBgmPlaying] = useState(false);
+          // Audio Ref
           const audioRef = useRef(null);
 
+          // คำนวณข้อมูลกราฟ
           const totalVotes = options.reduce((sum, opt) => sum + opt.votes, 0);
-          
           const chartData = [...options].sort((a, b) => b.votes - a.votes).map(opt => ({
             name: opt.text,
             votes: opt.votes,
             fill: opt.color
           }));
 
-          // ฟังก์ชันเข้าสู่ระบบและบังคับ Fullscreen
-          const handleEnterSystem = () => {
-            setHasEntered(true);
-            setIsBgmPlaying(true); // เริ่มเล่นเพลงอัตโนมัติ
-
-            const elem = document.documentElement;
-            if (elem.requestFullscreen) {
-              elem.requestFullscreen().catch((err) => console.log("Fullscreen blocked by browser", err));
-            } else if (elem.webkitRequestFullscreen) { /* Safari */
-              elem.webkitRequestFullscreen();
-            } else if (elem.msRequestFullscreen) { /* IE11 */
-              elem.msRequestFullscreen();
-            }
-          };
-
-          // ควบคุมการเล่นเพลง
+          // 1. Initialize Firebase Auth
           useEffect(() => {
-            if (audioRef.current) {
-              if (isBgmPlaying) {
-                audioRef.current.play().catch(e => console.log("Audio autoplay prevented", e));
-              } else {
-                audioRef.current.pause();
-              }
-            }
-          }, [isBgmPlaying, bgmTrack]);
-
-          // ฟังก์ชันเริ่มกระบวนการประกาศผล
-          const startProcess = () => {
-            if (options.length === 0) return;
-            setShowResultOverlay(true); 
-            setIsSpinning(true);
-            setWinner(null);
-            setTimeLeft(countdownSetting);
-
-            const timerInterval = setInterval(() => {
-              setTimeLeft((prev) => {
-                if (prev <= 1) {
-                  clearInterval(timerInterval);
-                  determineWinner(); 
-                  return 0;
+            const initAuth = async () => {
+              try {
+                if (typeof __initial_auth_token !== 'undefined') {
+                  await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                  await signInAnonymously(auth);
                 }
-                return prev - 1;
-              });
-            }, 1000);
-          };
-
-          // ประมวลผลผู้ชนะ (รองรับทั้ง Highest และ Lowest)
-          const determineWinner = () => {
-            setTimeLeft(null);
-            if (totalVotes === 0) {
-              // ถ้าไม่มีใครโหวตเลย สุ่มแบบปกติ
-              const randomIndex = Math.floor(Math.random() * options.length);
-              setWinner(options[randomIndex]);
-            } else {
-              let targetVotes;
-              if (winCondition === 'highest') {
-                targetVotes = Math.max(...options.map(o => o.votes));
-              } else {
-                targetVotes = Math.min(...options.map(o => o.votes));
+                setIsFirebaseReady(true);
+              } catch (error) {
+                console.error("Auth error:", error);
+                // Even on error, try to proceed for local dev
+                setIsFirebaseReady(true); 
               }
-              
-              const eligibleOptions = options.filter(o => o.votes === targetVotes);
-              // ถ้ามีคะแนนเท่ากันหลายอัน ให้สุ่มจากกลุ่มนั้น
-              const selectedWinner = eligibleOptions[Math.floor(Math.random() * eligibleOptions.length)];
-              setWinner(selectedWinner);
-            }
-            setIsSpinning(false);
-          };
+            };
+            initAuth();
+          }, []);
 
-          // Timer Effect
+          // 2. Real-time Listeners (ซิงค์ข้อมูลจากฐานข้อมูล)
+          useEffect(() => {
+            if (!isFirebaseReady) return;
+
+            // แก้ไข Path ฐานข้อมูลให้ถูกต้องตามเงื่อนไข (ต้องมีโครงสร้าง public/data/{collection})
+            const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'room');
+            const optionsRef = collection(db, 'artifacts', appId, 'public', 'data', 'options');
+
+            // Set Initial Data if not exists
+            getDoc(roomRef).then(snap => {
+               if(!snap.exists()) {
+                   setDoc(roomRef, roomState).catch(err => console.warn("Initialize room state skipped (permission denied):", err.message));
+               }
+            }).catch(err => console.warn("Read initial room state failed:", err.message));
+
+            // Listen to Room State
+            const unsubRoom = onSnapshot(roomRef, (snap) => {
+              if (snap.exists()) {
+                const data = snap.data();
+                setRoomState(prev => ({...prev, ...data}));
+                
+                // ควบคุม BGM
+                if (audioRef.current) {
+                  if (data.isBgmPlaying && audioRef.current.paused && hasEntered) {
+                    audioRef.current.play().catch(e => console.log("Audio play blocked:", e));
+                  } else if (!data.isBgmPlaying && !audioRef.current.paused) {
+                    audioRef.current.pause();
+                  }
+                }
+
+                // ควบคุมหน้าจอประกาศผลอัตโนมัติ
+                if (data.winner) {
+                  setShowResultOverlay(true);
+                  setIsSpinning(false);
+                } else if (data.votingState === 'locked' && !data.winner && isAdminAuth) {
+                   // แอดมินเป็นคนสั่งประมวลผลเมื่อเวลาหมดและยังไม่มีคนชนะ
+                   startProcessToCloud(data);
+                } else if (data.votingState !== 'locked') {
+                  setShowResultOverlay(false);
+                }
+              }
+            }, (error) => console.log("Room sync error", error));
+
+            // Listen to Options
+            const unsubOptions = onSnapshot(query(optionsRef), (snap) => {
+              const opts = [];
+              snap.forEach(doc => opts.push({ id: doc.id, ...doc.data() }));
+              // Sort by ID to maintain order
+              opts.sort((a, b) => parseInt(a.id) - parseInt(b.id));
+              setOptions(opts);
+            }, (error) => console.log("Options sync error", error));
+
+            return () => { unsubRoom(); unsubOptions(); };
+          }, [isFirebaseReady, hasEntered, isAdminAuth]); // เพิ่ม isAdminAuth เพื่อให้แอดมินคนเดียวที่เป็นคนคำนวณผล
+
+          // 3. Global Timer Logic (ทำงานบนทุกเครื่องให้ตรงกัน)
           useEffect(() => {
             let interval;
-            if (votingState === 'active' && votingTimeLeft > 0) {
+            if (roomState.votingState === 'active') {
               interval = setInterval(() => {
-                setVotingTimeLeft((prev) => prev - 1);
-              }, 1000);
-            } else if (votingState === 'active' && votingTimeLeft === 0) {
-              setVotingState('locked');
-              startProcess();
+                const now = Date.now();
+                const remaining = Math.max(0, Math.floor((roomState.votingEndTime - now) / 1000));
+                setLocalTimeLeft(remaining);
+
+                // ถ้าหมดเวลา แอดมินจะทำการล็อคห้อง
+                if (remaining === 0 && isAdminAuth) {
+                  handleStopVoting();
+                }
+              }, 100); // อัปเดตบ่อยขึ้นเพื่อให้ลื่นไหล
+            } else {
+              setLocalTimeLeft(roomState.durationSetting);
             }
             return () => clearInterval(interval);
-          }, [votingState, votingTimeLeft]);
+          }, [roomState.votingState, roomState.votingEndTime, roomState.durationSetting, isAdminAuth]);
+
+          // --- คัดลอกลิงก์ ---
+          const copyToClipboard = () => {
+            const url = window.location.href;
+            const textArea = document.createElement("textarea");
+            textArea.value = url;
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+              document.execCommand('copy');
+              setToastMessage({ show: true, text: 'คัดลอกลิงก์เรียบร้อย ส่งให้เพื่อนได้เลย!' });
+              setTimeout(() => setToastMessage({ show: false, text: '' }), 3000);
+            } catch (err) {
+              console.error('Failed to copy', err);
+            }
+            document.body.removeChild(textArea);
+          };
+
+          // --- CLOUD UPDATE FUNCTIONS (แทนที่ setState ปกติ) ---
+          const updateRoom = async (updates) => {
+             try {
+               const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'room');
+               await updateDoc(roomRef, updates);
+             } catch (e) {
+               console.error("Update Room Error:", e.message);
+             }
+          };
+
+          const handleVote = async (id) => {
+            if (roomState.votingState !== 'active') return;
+            try {
+              const optRef = doc(db, 'artifacts', appId, 'public', 'data', 'options', id.toString());
+              const snap = await getDoc(optRef);
+              if(snap.exists()) {
+                 await updateDoc(optRef, { votes: snap.data().votes + 1 });
+              }
+            } catch (err) {
+              console.error("Vote Error:", err.message);
+            }
+          };
+
+          const handleAddOption = async (e) => {
+            e.preventDefault();
+            if (!newOptionText.trim()) return;
+            
+            try {
+              const newId = options.length > 0 ? Math.max(...options.map(o => parseInt(o.id))) + 1 : 1;
+              const optRef = doc(db, 'artifacts', appId, 'public', 'data', 'options', newId.toString());
+              await setDoc(optRef, { 
+                text: newOptionText.trim(), votes: 0,
+                emoji: newOptionEmoji || '✨', color: newOptionColor
+              });
+            } catch (err) {
+              console.error("Add Option Error:", err.message);
+            }
+
+            setNewOptionText('');
+            const randomColors = ['#f43f5e', '#a855f7', '#3b82f6', '#10b981', '#f59e0b', '#06b6d4', '#ef4444', '#8b5cf6'];
+            setNewOptionColor(randomColors[Math.floor(Math.random() * randomColors.length)]);
+          };
+
+          const handleDeleteOption = async (id) => {
+            try {
+              await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'options', id.toString()));
+            } catch (err) {
+              console.error("Delete Option Error:", err.message);
+            }
+          };
+
+          const handleResetVotes = async () => {
+             try {
+               // Reset votes in cloud
+               for (const opt of options) {
+                  await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'options', opt.id.toString()), { votes: 0 });
+               }
+               await updateRoom({ winner: null, votingState: 'waiting' });
+             } catch (err) {
+               console.error("Reset Votes Error:", err.message);
+             }
+          };
+
+          const handleResetAll = async () => {
+             try {
+               for (const opt of options) {
+                  await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'options', opt.id.toString()));
+               }
+               await updateRoom({ winner: null, votingState: 'waiting' });
+             } catch (err) {
+               console.error("Reset All Error:", err.message);
+             }
+          };
+
+          const handleStartVoting = async () => {
+            const endTime = Date.now() + (roomState.durationSetting * 1000);
+            await updateRoom({ votingState: 'active', votingEndTime: endTime, winner: null });
+          };
+
+          const handleExtendVoting = async () => {
+            const currentEndTime = Math.max(Date.now(), roomState.votingEndTime);
+            await updateRoom({ votingEndTime: currentEndTime + (15 * 1000) });
+          };
+
+          const handleStopVoting = async () => {
+            await updateRoom({ votingState: 'locked' });
+            // ผลจะถูกประมวลผลโดย useEffect ของแอดมิน
+          };
+
+          // ประมวลผลและประกาศผลไปที่ Cloud
+          const startProcessToCloud = (currentRoomState) => {
+             if (options.length === 0) return;
+             
+             // ซิงค์ให้ทุกคนขึ้นจอค้นหา
+             setShowResultOverlay(true);
+             setIsSpinning(true);
+             
+             let time = currentRoomState.countdownSetting;
+             setRevealTimeLeft(time);
+
+             const timerInterval = setInterval(() => {
+               time -= 1;
+               setRevealTimeLeft(time);
+               if (time <= 0) {
+                 clearInterval(timerInterval);
+                 
+                 // คำนวณผู้ชนะ
+                 let selectedWinner = null;
+                 const currentTotalVotes = options.reduce((sum, opt) => sum + opt.votes, 0);
+
+                 if (currentTotalVotes === 0) {
+                   selectedWinner = options[Math.floor(Math.random() * options.length)];
+                 } else {
+                   let targetVotes;
+                   if (currentRoomState.winCondition === 'highest') {
+                     targetVotes = Math.max(...options.map(o => o.votes));
+                   } else {
+                     targetVotes = Math.min(...options.map(o => o.votes));
+                   }
+                   const eligibleOptions = options.filter(o => o.votes === targetVotes);
+                   selectedWinner = eligibleOptions[Math.floor(Math.random() * eligibleOptions.length)];
+                 }
+
+                 // ส่งผู้ชนะไปให้ทุกคนเห็น
+                 updateRoom({ winner: selectedWinner });
+               }
+             }, 1000);
+          };
 
           const handlePinInput = (num) => {
             setPinError(false);
@@ -211,58 +384,13 @@
             }
           };
 
-          const handleStartVoting = () => {
-            setWinner(null);
-            setVotingTimeLeft(votingDurationSetting);
-            setVotingState('active');
+          const handleEnterSystem = () => {
+            setHasEntered(true);
+            const elem = document.documentElement;
+            if (elem.requestFullscreen) {
+              elem.requestFullscreen().catch((err) => console.log("Fullscreen blocked", err));
+            } else if (elem.webkitRequestFullscreen) { elem.webkitRequestFullscreen(); }
           };
-
-          const handleExtendVoting = () => {
-            setVotingTimeLeft(prev => prev + 15);
-            setVotingState('active');
-          };
-
-          const handleStopVoting = () => {
-            setVotingTimeLeft(0);
-            setVotingState('locked');
-            startProcess(); 
-          };
-
-          const handleVote = (id) => {
-            if (votingState !== 'active') return;
-            setOptions(options.map(opt => 
-              opt.id === id ? { ...opt, votes: opt.votes + 1 } : opt
-            ));
-          };
-
-          const handleAddOption = (e) => {
-            e.preventDefault();
-            if (!newOptionText.trim()) return;
-            const newId = options.length > 0 ? Math.max(...options.map(o => o.id)) + 1 : 1;
-            setOptions([...options, { 
-              id: newId, text: newOptionText.trim(), votes: 0,
-              emoji: newOptionEmoji || '✨', color: newOptionColor
-            }]);
-            setNewOptionText('');
-            const randomColors = ['#f43f5e', '#a855f7', '#3b82f6', '#10b981', '#f59e0b', '#06b6d4', '#ef4444', '#8b5cf6'];
-            setNewOptionColor(randomColors[Math.floor(Math.random() * randomColors.length)]);
-          };
-
-          const handleDeleteOption = (id) => setOptions(options.filter(opt => opt.id !== id));
-          const openConfirmDialog = (title, desc, action) => setConfirmDialog({ isOpen: true, title, desc, action });
-
-          const handleResetVotes = () => {
-            openConfirmDialog('⚠️ ยืนยันการล้างคะแนน', 'คะแนนโหวตของทุกตัวเลือกจะถูกรีเซ็ตเป็น 0 คุณแน่ใจหรือไม่?', () => {
-              setOptions(options.map(opt => ({ ...opt, votes: 0 })));
-              setWinner(null); setVotingState('waiting');
-            });
-          };
-
-          const handleResetAll = () => {
-              openConfirmDialog('🚨 ลบข้อมูลทั้งหมด', 'ตัวเลือกและคะแนนทั้งหมดจะถูกลบเพื่อเริ่มต้นใหม่ ต้องการดำเนินการต่อหรือไม่?', () => {
-                  setOptions([]); setWinner(null); setVotingState('waiting');
-              });
-          }
 
           const formatTime = (seconds) => {
             const m = Math.floor(seconds / 60);
@@ -284,16 +412,25 @@
                   <h1 className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-indigo-400 to-fuchsia-400 mb-2 tracking-widest text-center uppercase" style={{ WebkitTextStroke: '1px rgba(255,255,255,0.2)' }}>
                     VOTE ARENA
                   </h1>
-                  <p className="text-slate-400 text-lg mb-12 tracking-widest uppercase font-bold">Interactive Polling System</p>
+                  <p className="text-cyan-400 text-xl mb-12 tracking-widest uppercase font-black bg-cyan-900/40 px-6 py-2 rounded-full border border-cyan-500/50 shadow-[0_0_20px_rgba(34,211,238,0.2)]">
+                    🌍 LIVE ONLINE EDITION
+                  </p>
                   
-                  <button 
-                    onClick={handleEnterSystem}
-                    className="group bg-indigo-600 text-white text-2xl font-black px-12 py-6 rounded-2xl btn-3d flex items-center gap-4 border-2 border-indigo-400"
-                    style={{ '--btn-shadow': '#3730a3', boxShadow: '0 8px 0 #3730a3, 0 15px 30px rgba(0,0,0,0.5)' }}
-                  >
-                    <Power className="group-hover:animate-spin" size={32} />
-                    PRESS START
-                  </button>
+                  {!isFirebaseReady ? (
+                    <div className="flex flex-col items-center gap-4">
+                       <RefreshCw className="animate-spin text-white" size={32} />
+                       <p className="text-slate-400 font-bold">Connecting to Cloud...</p>
+                    </div>
+                  ) : (
+                    <button 
+                      onClick={handleEnterSystem}
+                      className="group bg-indigo-600 text-white text-2xl font-black px-12 py-6 rounded-2xl btn-3d flex items-center gap-4 border-2 border-indigo-400"
+                      style={{ '--btn-shadow': '#3730a3', boxShadow: '0 8px 0 #3730a3, 0 15px 30px rgba(0,0,0,0.5)' }}
+                    >
+                      <Power className="group-hover:animate-spin" size={32} />
+                      PRESS START
+                    </button>
+                  )}
                   <p className="text-slate-500 mt-6 text-sm flex items-center gap-2"><Maximize size={16}/> ระบบจะแสดงผลแบบเต็มหน้าจออัตโนมัติ</p>
                 </div>
               </div>
@@ -306,8 +443,13 @@
           return (
             <div className="relative min-h-screen w-full bg-slate-950 font-sans text-slate-800 overflow-x-hidden perspective-1000">
               
-              {/* Audio Element (Hidden) */}
-              <audio ref={audioRef} src={BGM_TRACKS[bgmTrack].url} loop preload="auto" />
+              {/* Audio Element */}
+              <audio ref={audioRef} src={BGM_TRACKS[roomState.bgmTrack].url} loop preload="auto" />
+
+              {/* Toast Notification */}
+              <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-[300] bg-emerald-500 text-white px-6 py-3 rounded-full font-bold shadow-[0_10px_30px_rgba(16,185,129,0.5)] flex items-center gap-2 toast ${toastMessage.show ? 'show' : 'hide'}`}>
+                <CopyCheck size={20} /> {toastMessage.text}
+              </div>
 
               {/* Game Background Elements */}
               <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden bg-slate-950">
@@ -315,73 +457,57 @@
                 <div className="absolute top-[-10%] left-[-10%] w-[40vw] h-[40vw] bg-fuchsia-600/20 rounded-full blur-[100px] animate-pulse"></div>
                 <div className="absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vw] bg-cyan-600/20 rounded-full blur-[120px] animate-pulse delay-700"></div>
               </div>
-              
-              {/* Dialog Modal */}
-              {confirmDialog.isOpen && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4">
-                  <div className="bg-slate-900 border border-slate-700 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] w-full max-w-sm p-6 animate-in zoom-in-95 duration-200 transform-3d">
-                    <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2"><AlertCircle className="text-rose-500" /> {confirmDialog.title}</h3>
-                    <p className="text-slate-300 mb-6">{confirmDialog.desc}</p>
-                    <div className="flex gap-3 justify-end">
-                      <button onClick={() => setConfirmDialog({ isOpen: false })} className="px-5 py-2.5 text-slate-300 hover:bg-slate-800 rounded-xl font-medium">ยกเลิก</button>
-                      <button onClick={() => { confirmDialog.action(); setConfirmDialog({ isOpen: false }); }} className="px-5 py-2.5 bg-rose-600 text-white rounded-xl font-bold btn-3d" style={{ '--btn-shadow': '#9f1239', boxShadow: '0 6px 0 #9f1239' }}>ยืนยัน</button>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {/* 🌟 FULLSCREEN RESULT OVERLAY 🌟 */}
               {showResultOverlay && (
                 <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-2xl p-4 overflow-hidden perspective-1000 animate-in fade-in duration-500">
-                  
                   <div className="absolute inset-0 overflow-hidden pointer-events-none">
                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90vw] h-[90vw] bg-indigo-600/10 rounded-full blur-[150px] animate-pulse"></div>
                   </div>
 
                   <h3 className="text-3xl md:text-5xl font-black text-white mb-8 uppercase tracking-widest text-center z-10 drop-shadow-[0_0_15px_rgba(255,255,255,0.5)] flex items-center justify-center gap-4 animate-in slide-in-from-top-10 duration-700">
                     <Crown className="text-yellow-400" size={48} />
-                    {winCondition === 'highest' ? 'ผู้ชนะคะแนนสูงสุด!' : 'ผู้ชนะคะแนนน้อยสุด!'}
+                    {roomState.winCondition === 'highest' ? 'ผู้ชนะคะแนนสูงสุด!' : 'ผู้ชนะคะแนนน้อยสุด!'}
                     <Crown className="text-yellow-400" size={48} />
                   </h3>
 
                   <div 
                     className={`w-full max-w-4xl h-[40vh] min-h-[350px] flex items-center justify-center rounded-[3rem] relative monitor-3d transition-all duration-1000 ${
-                      winner ? 'border-4 border-yellow-400 scale-105' : 'bg-slate-900 border-4 border-slate-800'
+                      roomState.winner ? 'border-4 border-yellow-400 scale-105' : 'bg-slate-900 border-4 border-slate-800'
                     }`}
-                    style={{ backgroundColor: winner ? winner.color : undefined }}
+                    style={{ backgroundColor: roomState.winner ? roomState.winner.color : undefined }}
                   >
                     <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/pixel-weave.png')] opacity-20 mix-blend-overlay pointer-events-none rounded-[3rem]"></div>
-                    {!winner && !isSpinning && <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-500/20 via-transparent to-transparent animate-pulse rounded-[3rem]"></div>}
+                    {!roomState.winner && isSpinning && <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-500/20 via-transparent to-transparent animate-pulse rounded-[3rem]"></div>}
                     
-                    {isSpinning && timeLeft !== null ? (
+                    {isSpinning && revealTimeLeft !== null ? (
                       <div className="flex flex-col items-center justify-center animate-in zoom-in duration-300 relative z-10 transform-3d">
                         <span className="text-cyan-400 font-black mb-4 tracking-widest text-lg md:text-xl uppercase flex items-center gap-2 bg-black/50 px-6 py-2 rounded-full border border-cyan-500/30 shadow-[0_0_20px_rgba(34,211,238,0.2)]">
-                          <Timer size={24} className="animate-spin" /> ค้นหาผู้ชนะ...
+                          <Timer size={24} className="animate-spin" /> ระบบกำลังค้นหาผลลัพธ์...
                         </span>
-                        <div className="text-[8rem] md:text-[12rem] font-black text-white tabular-nums drop-shadow-[0_0_40px_rgba(255,255,255,0.8)] leading-none">{timeLeft}</div>
+                        <div className="text-[8rem] md:text-[12rem] font-black text-white tabular-nums drop-shadow-[0_0_40px_rgba(255,255,255,0.8)] leading-none">{revealTimeLeft}</div>
                       </div>
-                    ) : winner ? (
+                    ) : roomState.winner ? (
                       <div className="flex flex-col items-center justify-center animate-in zoom-in-50 duration-700 z-10 w-full px-4 transform-3d">
                         <div className="absolute inset-0 opacity-40 animate-spin-slow rounded-[3rem]" style={{ background: 'repeating-conic-gradient(from 0deg, transparent 0deg 15deg, white 15deg 30deg)' }}></div>
                         <div className="text-[6rem] md:text-[8rem] mb-4 drop-shadow-[0_20px_40px_rgba(0,0,0,0.6)] bg-white/20 w-40 h-40 md:w-56 md:h-56 flex items-center justify-center rounded-full animate-float backdrop-blur-md border-4 border-white/80 z-10">
-                          {winner.emoji}
+                          {roomState.winner.emoji}
                         </div>
-                        <div className="text-4xl md:text-6xl font-black text-white text-center leading-tight drop-shadow-[0_8px_20px_rgba(0,0,0,0.9)] z-10 px-4">{winner.text}</div>
+                        <div className="text-4xl md:text-6xl font-black text-white text-center leading-tight drop-shadow-[0_8px_20px_rgba(0,0,0,0.9)] z-10 px-4">{roomState.winner.text}</div>
                         <div className="mt-6 text-slate-900 font-black text-2xl md:text-3xl bg-white px-8 py-3 rounded-full shadow-[0_15px_30px_rgba(0,0,0,0.5)] z-10 transform -rotate-2 border-4 border-yellow-400">
-                          ชนะด้วย: {winner.votes} โหวต 🎉
+                          ชนะด้วย: {roomState.winner.votes} โหวต 🎉
                         </div>
                       </div>
                     ) : null}
                   </div>
 
-                  {view === 'admin' && (
+                  {isAdminAuth ? (
                     <div className="mt-10 z-10 flex gap-4 animate-in slide-in-from-bottom-10 duration-700 delay-300 fill-mode-both">
-                      <button onClick={() => setShowResultOverlay(false)} className="bg-slate-800 hover:bg-slate-700 text-white px-8 py-4 rounded-2xl font-black text-lg btn-3d border border-slate-600 shadow-[0_6px_0_#334155]" style={{'--btn-shadow': '#334155'}}>
-                        ปิดหน้าต่าง (ดูสถิติรวม)
+                      <button onClick={() => updateRoom({ winner: null, votingState: 'waiting' })} className="bg-slate-800 hover:bg-slate-700 text-white px-8 py-4 rounded-2xl font-black text-lg btn-3d border border-slate-600 shadow-[0_6px_0_#334155]" style={{'--btn-shadow': '#334155'}}>
+                        ปิดหน้าต่าง (กลับสู่โหมดรอ)
                       </button>
                     </div>
-                  )}
-                  {view === 'user' && winner && (
+                  ) : (
                      <div className="mt-10 z-10 text-white/50 font-bold animate-pulse">รอแอดมินปิดหน้าต่างประกาศผล...</div>
                   )}
                 </div>
@@ -394,24 +520,35 @@
                 <div className="w-full max-w-5xl bg-white/90 backdrop-blur-2xl rounded-[2rem] shadow-[0_20px_60px_rgba(0,0,0,0.6),inset_0_2px_4px_rgba(255,255,255,0.8)] border border-white/20 overflow-hidden flex flex-col h-fit transform-3d">
                   
                   {/* Top Navigation Bar */}
-                  <div className="flex p-2 gap-2 bg-slate-900/5 backdrop-blur-md border-b border-slate-200/50 relative z-20">
+                  <div className="flex flex-col sm:flex-row p-2 gap-2 bg-slate-900/5 backdrop-blur-md border-b border-slate-200/50 relative z-20 items-stretch sm:items-center justify-between">
+                    <div className="flex gap-2 flex-1 w-full sm:w-auto">
+                      <button 
+                        onClick={() => setView('user')}
+                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl font-black transition-all duration-300 text-sm md:text-base btn-3d ${
+                          view === 'user' ? 'bg-white text-indigo-600' : 'bg-slate-200 text-slate-500 hover:bg-white/50'
+                        }`}
+                        style={{ '--btn-shadow': view === 'user' ? '#cbd5e1' : '#94a3b8', boxShadow: view === 'user' ? '0 4px 0 #cbd5e1' : '0 4px 0 #e2e8f0' }}
+                      >
+                        <Gamepad2 size={20} className={view === 'user' ? 'animate-bounce' : ''} /> PLAYER ZONE
+                      </button>
+                      <button 
+                        onClick={() => setView('admin')}
+                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl font-black transition-all duration-300 text-sm md:text-base btn-3d ${
+                          view === 'admin' ? 'bg-slate-900 text-rose-400' : 'bg-slate-200 text-slate-500 hover:bg-white/50'
+                        }`}
+                        style={{ '--btn-shadow': view === 'admin' ? '#0f172a' : '#94a3b8', boxShadow: view === 'admin' ? '0 4px 0 #0f172a' : '0 4px 0 #e2e8f0' }}
+                      >
+                        <Lock size={20} /> ADMIN ROOM
+                      </button>
+                    </div>
+                    
+                    {/* ปุ่มแชร์ลิงก์ */}
                     <button 
-                      onClick={() => setView('user')}
-                      className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-2xl font-black transition-all duration-300 text-sm md:text-base btn-3d ${
-                        view === 'user' ? 'bg-white text-indigo-600' : 'bg-slate-200 text-slate-500 hover:bg-white/50'
-                      }`}
-                      style={{ '--btn-shadow': view === 'user' ? '#cbd5e1' : '#94a3b8', boxShadow: view === 'user' ? '0 4px 0 #cbd5e1' : '0 4px 0 #e2e8f0' }}
+                      onClick={copyToClipboard}
+                      className="w-full sm:w-auto flex items-center justify-center gap-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-bold py-3 px-4 rounded-xl border border-emerald-300 transition-colors btn-3d"
+                      style={{ '--btn-shadow': '#a7f3d0', boxShadow: '0 4px 0 #a7f3d0' }}
                     >
-                      <Gamepad2 size={22} className={view === 'user' ? 'animate-bounce' : ''} /> PLAYER ZONE
-                    </button>
-                    <button 
-                      onClick={() => setView('admin')}
-                      className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-2xl font-black transition-all duration-300 text-sm md:text-base btn-3d ${
-                        view === 'admin' ? 'bg-slate-900 text-rose-400' : 'bg-slate-200 text-slate-500 hover:bg-white/50'
-                      }`}
-                      style={{ '--btn-shadow': view === 'admin' ? '#0f172a' : '#94a3b8', boxShadow: view === 'admin' ? '0 4px 0 #0f172a' : '0 4px 0 #e2e8f0' }}
-                    >
-                      <Lock size={22} /> ADMIN ROOM
+                      <Link size={18} /> คัดลอกลิงก์ให้เพื่อนโหวต
                     </button>
                   </div>
 
@@ -425,37 +562,41 @@
                           <div className="absolute top-0 right-0 p-4 opacity-10"><Gamepad2 size={150} /></div>
                           <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
                             <div className="flex-1">
-                              <h2 className="text-2xl md:text-4xl font-black tracking-tight leading-tight mb-3 drop-shadow-lg" style={{textShadow: '0 4px 10px rgba(0,0,0,0.5)'}}>{topicTitle}</h2>
+                              <h2 className="text-2xl md:text-4xl font-black tracking-tight leading-tight mb-3 drop-shadow-lg" style={{textShadow: '0 4px 10px rgba(0,0,0,0.5)'}}>{roomState.topicTitle}</h2>
                               <div className="flex flex-wrap items-center gap-3">
-                                {votingState === 'active' ? (
+                                {roomState.votingState === 'active' ? (
                                   <div className="inline-flex items-center gap-2 bg-emerald-500/20 border border-emerald-400/50 px-4 py-1.5 rounded-full text-emerald-300 font-bold shadow-[0_0_15px_rgba(16,185,129,0.3)] animate-pulse">
                                     <Unlock size={18} /> เปิดโหวตแล้ว!
                                   </div>
-                                ) : votingState === 'locked' ? (
+                                ) : roomState.votingState === 'locked' ? (
                                   <div className="inline-flex items-center gap-2 bg-rose-500/20 border border-rose-400/50 px-4 py-1.5 rounded-full text-rose-300 font-bold">
                                     <Lock size={18} /> ปิดโหวตแล้ว
                                   </div>
                                 ) : (
                                   <div className="inline-flex items-center gap-2 bg-amber-500/20 border border-amber-400/50 px-4 py-1.5 rounded-full text-amber-300 font-bold">
-                                    <Clock size={18} /> รอเริ่มการโหวต...
+                                    <Clock size={18} /> รอแอดมินเปิดโหวต...
                                   </div>
                                 )}
                                 <span className="text-indigo-200 font-medium text-sm flex items-center gap-1 bg-black/30 px-3 py-1 rounded-full">
-                                  {winCondition === 'highest' ? <ArrowUpToLine size={16} className="text-emerald-400" /> : <ArrowDownToLine size={16} className="text-rose-400" />}
-                                  {winCondition === 'highest' ? 'โหวตมากสุดชนะ!' : 'โหวตน้อยสุดชนะ/รอด!'}
+                                  {roomState.winCondition === 'highest' ? <ArrowUpToLine size={16} className="text-emerald-400" /> : <ArrowDownToLine size={16} className="text-rose-400" />}
+                                  {roomState.winCondition === 'highest' ? 'โหวตมากสุดชนะ!' : 'โหวตน้อยสุดชนะ/รอด!'}
                                 </span>
                               </div>
                             </div>
-                            {votingState === 'active' && (
-                              <div className="bg-black/40 backdrop-blur-md border border-white/10 rounded-2xl p-4 flex items-center justify-center min-w-[140px] shadow-inner">
-                                <span className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-slate-400 tabular-nums">{formatTime(votingTimeLeft)}</span>
-                              </div>
-                            )}
+                            
+                            <div className="bg-black/40 backdrop-blur-md border border-white/10 rounded-2xl p-4 flex items-center justify-center min-w-[140px] shadow-inner">
+                              <span className={`text-4xl md:text-5xl font-black tabular-nums ${roomState.votingState === 'active' ? 'text-cyan-400 drop-shadow-[0_0_15px_rgba(34,211,238,0.8)]' : 'text-slate-400'}`}>
+                                {formatTime(localTimeLeft)}
+                              </span>
+                            </div>
                           </div>
                         </div>
 
                         {/* View Toggle */}
-                        <div className="flex justify-end mb-[-10px] relative z-20">
+                        <div className="flex justify-between items-end mb-[-10px] relative z-20">
+                          <div className="bg-indigo-100 text-indigo-700 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2">
+                             <Users size={16} /> โหวตรวมทั้งหมด: {totalVotes}
+                          </div>
                           <div className="flex bg-white p-1.5 rounded-2xl shadow-md border border-slate-200 w-fit">
                             <button onClick={() => setChartView('list')} className={`p-2 rounded-xl transition-all ${chartView === 'list' ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100'}`}><List size={20} /></button>
                             <button onClick={() => setChartView('bar')} className={`p-2 rounded-xl transition-all ${chartView === 'bar' ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100'}`}><BarChart3 size={20} /></button>
@@ -475,26 +616,24 @@
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                                 {options.map((option) => {
                                   const percentage = totalVotes === 0 ? 0 : Math.round((option.votes / totalVotes) * 100);
-                                  const isWinnerReveal = winner && winner.id === option.id;
 
                                   return (
-                                    <div key={option.id} className={`card-3d relative rounded-3xl p-6 bg-white border border-slate-200 shadow-[0_10px_30px_-10px_rgba(0,0,0,0.1)] overflow-hidden group ${votingState !== 'active' && !isWinnerReveal ? 'opacity-80 grayscale-[20%]' : ''} ${isWinnerReveal ? 'ring-4 ring-yellow-400 shadow-[0_0_40px_rgba(250,204,21,0.5)] z-20 scale-105' : ''}`}>
+                                    <div key={option.id} className={`card-3d relative rounded-3xl p-6 bg-white border border-slate-200 shadow-[0_10px_30px_-10px_rgba(0,0,0,0.1)] overflow-hidden group ${roomState.votingState !== 'active' ? 'opacity-80 grayscale-[20%]' : ''}`}>
                                       <div className="absolute left-0 bottom-0 top-0 opacity-10 transition-all duration-1000 ease-out z-0" style={{ width: `${percentage}%`, backgroundColor: option.color }} />
-                                      {votingState !== 'active' && !isWinnerReveal && <div className="absolute inset-0 z-30 bg-slate-900/10 backdrop-blur-[1px] flex items-center justify-center pointer-events-none"></div>}
+                                      {roomState.votingState !== 'active' && <div className="absolute inset-0 z-30 bg-slate-900/10 backdrop-blur-[1px] flex items-center justify-center pointer-events-none"></div>}
 
                                       <div className="relative z-10 flex flex-col h-full justify-between gap-6">
                                         <div className="flex items-center gap-4">
                                           <div className="relative">
                                             <div className="text-4xl bg-slate-50 w-16 h-16 flex items-center justify-center rounded-2xl shadow-inner border border-slate-100 group-hover:scale-110 transition-transform">{option.emoji}</div>
-                                            {isWinnerReveal && <Crown className="absolute -top-4 -right-3 text-yellow-400 drop-shadow-md animate-bounce" size={28} fill="currentColor" />}
                                           </div>
                                           <div>
                                             <h3 className="text-xl font-black text-slate-800">{option.text}</h3>
                                             <div className="text-sm font-bold text-slate-500 mt-1 flex items-center gap-2"><span className="w-3 h-3 rounded-full shadow-sm" style={{ backgroundColor: option.color }}></span>{option.votes} โหวต ({percentage}%)</div>
                                           </div>
                                         </div>
-                                        <button onClick={() => handleVote(option.id)} disabled={votingState !== 'active'} style={{ backgroundColor: votingState === 'active' ? option.color : '#94a3b8', '--btn-shadow': votingState === 'active' ? `${option.color}80` : '#64748b' }} className={`w-full py-4 rounded-xl font-black text-lg text-white btn-3d flex items-center justify-center gap-2 shadow-[0_6px_0_var(--btn-shadow)]`}>
-                                          {votingState === 'active' ? (<><CheckCircle2 size={24} /> PUSH TO VOTE!</>) : (<><Lock size={20} /> LOCKED</>)}
+                                        <button onClick={() => handleVote(option.id)} disabled={roomState.votingState !== 'active'} style={{ backgroundColor: roomState.votingState === 'active' ? option.color : '#94a3b8', '--btn-shadow': roomState.votingState === 'active' ? `${option.color}80` : '#64748b' }} className={`w-full py-4 rounded-xl font-black text-lg text-white btn-3d flex items-center justify-center gap-2 shadow-[0_6px_0_var(--btn-shadow)]`}>
+                                          {roomState.votingState === 'active' ? (<><CheckCircle2 size={24} /> PUSH TO VOTE!</>) : (<><Lock size={20} /> LOCKED</>)}
                                         </button>
                                       </div>
                                     </div>
@@ -506,7 +645,7 @@
                             {/* Chart Views */}
                             {(chartView === 'bar' || chartView === 'pie') && (
                               <div className="h-[400px] md:h-[500px] w-full bg-white rounded-3xl p-4 shadow-sm border border-slate-200 relative">
-                                {votingState !== 'active' && <div className="absolute top-4 right-4 bg-rose-100 text-rose-600 px-3 py-1 rounded-full text-xs font-bold border border-rose-200 z-10"><Lock size={12} className="inline mr-1" /> ระบบล็อคอยู่</div>}
+                                {roomState.votingState !== 'active' && <div className="absolute top-4 right-4 bg-rose-100 text-rose-600 px-3 py-1 rounded-full text-xs font-bold border border-rose-200 z-10"><Lock size={12} className="inline mr-1" /> ระบบล็อคอยู่</div>}
                                 <ResponsiveContainer width="100%" height="100%">
                                   {chartView === 'bar' ? (
                                     <BarChart data={chartData} margin={{ top: 20, right: 20, left: -20, bottom: 40 }}>
@@ -561,17 +700,16 @@
                               <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-[0_10px_20px_rgba(0,0,0,0.05)] border-b-4 border-b-slate-300 transform-3d flex flex-col gap-4">
                                 <div>
                                   <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Edit3 size={16} /> หัวข้อการโหวต</h3>
-                                  <input type="text" value={topicTitle} onChange={(e) => setTopicTitle(e.target.value)} className="w-full text-xl font-black bg-slate-100 px-4 py-3 rounded-xl focus:ring-4 focus:ring-indigo-100 focus:outline-none transition-all border border-slate-200" />
+                                  <input type="text" value={roomState.topicTitle} onChange={(e) => updateRoom({topicTitle: e.target.value})} className="w-full text-xl font-black bg-slate-100 px-4 py-3 rounded-xl focus:ring-4 focus:ring-indigo-100 focus:outline-none transition-all border border-slate-200" />
                                 </div>
                                 
-                                {/* Win Condition Selector (NEW) */}
                                 <div className="pt-2 border-t border-slate-100">
                                   <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Trophy size={16} /> กติกาผู้ชนะรอบนี้</h3>
                                   <div className="flex gap-2">
-                                    <button onClick={() => setWinCondition('highest')} className={`flex-1 py-3 px-2 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${winCondition === 'highest' ? 'bg-emerald-100 text-emerald-700 border-2 border-emerald-500 shadow-sm' : 'bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100'}`}>
+                                    <button onClick={() => updateRoom({winCondition: 'highest'})} className={`flex-1 py-3 px-2 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${roomState.winCondition === 'highest' ? 'bg-emerald-100 text-emerald-700 border-2 border-emerald-500 shadow-sm' : 'bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100'}`}>
                                       <ArrowUpToLine size={18} /> โหวตมากสุดชนะ
                                     </button>
-                                    <button onClick={() => setWinCondition('lowest')} className={`flex-1 py-3 px-2 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${winCondition === 'lowest' ? 'bg-rose-100 text-rose-700 border-2 border-rose-500 shadow-sm' : 'bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100'}`}>
+                                    <button onClick={() => updateRoom({winCondition: 'lowest'})} className={`flex-1 py-3 px-2 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${roomState.winCondition === 'lowest' ? 'bg-rose-100 text-rose-700 border-2 border-rose-500 shadow-sm' : 'bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100'}`}>
                                       <ArrowDownToLine size={18} /> โหวตน้อยสุดชนะ
                                     </button>
                                   </div>
@@ -580,19 +718,19 @@
 
                               <div className="bg-slate-900 p-6 rounded-3xl text-white shadow-[0_15px_30px_rgba(0,0,0,0.4)] border-b-8 border-b-black transform-3d relative overflow-hidden">
                                 <div className="absolute top-0 right-0 p-4 opacity-5"><Clock size={100} /></div>
-                                <h3 className="text-sm font-black text-cyan-500 uppercase tracking-widest mb-4 flex items-center gap-2 relative z-10"><Timer size={16} /> ระบบควบคุมเวลาโหวต</h3>
+                                <h3 className="text-sm font-black text-cyan-500 uppercase tracking-widest mb-4 flex items-center gap-2 relative z-10"><Timer size={16} /> ระบบควบคุมเวลา (ซิงค์ออนไลน์)</h3>
                                 
                                 <div className="flex flex-col sm:flex-row items-center gap-4 relative z-10">
                                   <div className="bg-black/50 border-2 border-slate-700 px-6 py-3 rounded-2xl flex-1 flex flex-col items-center justify-center shadow-inner">
-                                    <span className="text-xs text-slate-400 font-bold mb-1">{votingState === 'active' ? 'กำลังโหวต' : votingState === 'locked' ? 'ปิดโหวตแล้ว' : 'เวลาที่ตั้งไว้'}</span>
-                                    <span className={`text-4xl font-black tabular-nums ${votingState === 'active' ? 'text-cyan-400 drop-shadow-[0_0_10px_#22d3ee]' : 'text-slate-300'}`}>{formatTime(votingState === 'active' ? votingTimeLeft : votingDurationSetting)}</span>
+                                    <span className="text-xs text-slate-400 font-bold mb-1">{roomState.votingState === 'active' ? 'กำลังโหวต' : roomState.votingState === 'locked' ? 'ปิดโหวตแล้ว' : 'เวลาที่ตั้งไว้'}</span>
+                                    <span className={`text-4xl font-black tabular-nums ${roomState.votingState === 'active' ? 'text-cyan-400 drop-shadow-[0_0_10px_#22d3ee]' : 'text-slate-300'}`}>{formatTime(localTimeLeft)}</span>
                                   </div>
 
                                   <div className="grid grid-cols-2 sm:flex sm:flex-col gap-2 w-full sm:w-auto">
-                                    {votingState !== 'active' ? (
+                                    {roomState.votingState !== 'active' ? (
                                       <>
                                         <div className="col-span-2 flex items-center gap-2 bg-slate-800 p-1 rounded-xl mb-1">
-                                          <input type="number" min="10" value={votingDurationSetting} onChange={(e)=>setVotingDurationSetting(Number(e.target.value))} className="w-16 bg-black text-center text-white font-bold py-1 rounded" />
+                                          <input type="number" min="10" value={roomState.durationSetting} onChange={(e)=>updateRoom({durationSetting: Number(e.target.value)})} className="w-16 bg-black text-center text-white font-bold py-1 rounded" />
                                           <span className="text-xs text-slate-400 font-bold">วินาที</span>
                                         </div>
                                         <button onClick={handleStartVoting} className="col-span-2 bg-emerald-600 hover:bg-emerald-500 text-white font-black py-2 px-4 rounded-xl btn-3d flex items-center justify-center gap-2" style={{'--btn-shadow':'#064e3b', boxShadow:'0 4px 0 #064e3b'}}><PlayCircle size={18} /> เริ่มเปิดโหวต</button>
@@ -613,11 +751,11 @@
                               <div className="lg:col-span-5 flex flex-col gap-6">
                                 {/* Audio Control Panel */}
                                 <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm border-b-4 border-b-slate-300">
-                                   <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Music size={16} /> ระบบเสียงประกอบ (BGM)</h3>
+                                   <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Music size={16} /> ระบบเสียงประกอบ (BGM) ทุกเครื่อง</h3>
                                    <div className="space-y-3">
                                      <select 
-                                        value={bgmTrack} 
-                                        onChange={(e) => setBgmTrack(e.target.value)}
+                                        value={roomState.bgmTrack} 
+                                        onChange={(e) => updateRoom({bgmTrack: e.target.value})}
                                         className="w-full bg-slate-100 border border-slate-200 text-slate-700 font-bold py-2 px-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-400"
                                       >
                                         {Object.entries(BGM_TRACKS).map(([key, track]) => (
@@ -625,10 +763,10 @@
                                         ))}
                                      </select>
                                      <button 
-                                        onClick={() => setIsBgmPlaying(!isBgmPlaying)}
-                                        className={`w-full py-3 rounded-xl font-black flex items-center justify-center gap-2 transition-colors ${isBgmPlaying ? 'bg-rose-100 text-rose-600 border border-rose-300' : 'bg-indigo-600 text-white shadow-md'}`}
+                                        onClick={() => updateRoom({isBgmPlaying: !roomState.isBgmPlaying})}
+                                        className={`w-full py-3 rounded-xl font-black flex items-center justify-center gap-2 transition-colors ${roomState.isBgmPlaying ? 'bg-rose-100 text-rose-600 border border-rose-300' : 'bg-indigo-600 text-white shadow-md'}`}
                                       >
-                                        {isBgmPlaying ? <><Volume2 size={20} className="animate-pulse" /> หยุดเล่นเพลง</> : <><Play size={20} /> เล่นเพลงนี้</>}
+                                        {roomState.isBgmPlaying ? <><Volume2 size={20} className="animate-pulse" /> สั่งหยุดเพลงทุกเครื่อง</> : <><Play size={20} /> สั่งเล่นเพลงทุกเครื่อง</>}
                                       </button>
                                    </div>
                                 </div>
@@ -655,7 +793,7 @@
                                           <div className="absolute inset-0 flex items-center justify-center font-mono text-xs font-bold pointer-events-none mix-blend-difference text-white">{newOptionColor}</div>
                                         </div>
                                       </div>
-                                      <button type="submit" disabled={!newOptionText.trim()} className="w-full bg-slate-900 text-white h-12 rounded-xl font-black btn-3d" style={{'--btn-shadow':'#000', boxShadow:'0 4px 0 #000'}}>เพิ่ม</button>
+                                      <button type="submit" disabled={!newOptionText.trim()} className="w-full bg-slate-900 text-white h-12 rounded-xl font-black btn-3d" style={{'--btn-shadow':'#000', boxShadow:'0 4px 0 #000'}}>เพิ่มลงคลาวด์</button>
                                     </div>
                                   </form>
                                 </div>
@@ -698,23 +836,13 @@
                               <div className="flex flex-col sm:flex-row items-center gap-4 w-full justify-center">
                                 <div className="flex items-center gap-2 bg-slate-100 px-4 py-3 rounded-2xl border-b-4 border-slate-300 font-bold text-slate-600">
                                   <Timer size={20} /> ถอยหลังประกาศผล: 
-                                  <input type="number" min="3" max="20" value={countdownSetting} onChange={(e) => setCountdownSetting(Number(e.target.value))} className="w-14 bg-white text-center border border-slate-300 rounded p-1 ml-2" />
+                                  <input type="number" min="3" max="20" value={roomState.countdownSetting} onChange={(e) => updateRoom({countdownSetting: Number(e.target.value)})} className="w-14 bg-white text-center border border-slate-300 rounded p-1 ml-2" />
                                   วิ.
                                 </div>
-                                
-                                {votingState === 'locked' && options.length > 0 && (
-                                  <button
-                                    onClick={startProcess}
-                                    className="flex items-center gap-3 text-xl font-black px-8 py-4 rounded-2xl text-white transition-all duration-300 btn-3d bg-gradient-to-r from-rose-500 to-pink-600 border-rose-700"
-                                    style={{ '--btn-shadow': '#9f1239', boxShadow: '0 8px 0 #9f1239' }}
-                                  >
-                                    ประกาศผลอีกครั้ง!
-                                  </button>
-                                )}
                               </div>
                               
                               <p className="text-slate-500 text-sm mt-6 font-medium text-center bg-blue-50 text-blue-600 px-4 py-2 rounded-xl border border-blue-100">
-                                💡 ข้อมูล: ระบบจะทำการค้นหาผู้ชนะตามกติกาที่เลือก (คะแนนมาก/น้อย) และ "ประกาศผลอัตโนมัติแบบเต็มจอ" ทันที เมื่อเวลาโหวตหมด
+                                💡 ข้อมูลระบบออนไลน์: เมื่อเวลาโหวตในจอหลักหมดลง (0 วิ) แอดมินจะเป็นผู้คำนวณผู้ชนะตามกติกา และส่งภาพป๊อปอัปให้โชว์ <b>"เต็มจอพร้อมกัน"</b> ในทุกเครื่องทันทีโดยอัตโนมัติ
                               </p>
                             </div>
 
